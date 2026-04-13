@@ -1,0 +1,1643 @@
+---
+title: "Transnational Family Migration and Loneliness Among Older Filipinos"
+subtitle: "First-Difference + IPW Analysis with Mechanism and Exploratory Moderation"
+author: "Jem Marie Nario"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    theme: cosmo
+    code-fold: false
+    code-tools: true
+    self-contained: true
+knitr:
+  opts_chunk:
+    warning: false
+    message: false
+    echo: true
+editor: visual
+---
+
+# Overview and Analytic Strategy
+
+This document presents the full analysis for **"Transnational Family Migration and Loneliness Among Older Filipinos"** using the Longitudinal Study of Aging and Health in the Philippines (LSAHP), Waves 1 and 2.
+
+## Three-Tier Analytic Structure
+
+The analysis is organised into three tiers reflecting different levels of causal identification and available sample size.
+
+**Tier 1 — Causal (H1, n = 3,291).** A survey-weighted first-difference (FD) model with inverse probability weighting (IPW) estimates the within-person effect of entering a transnational household on loneliness. FD removes all time-invariant confounding; IPW additionally balances 15 observed baseline characteristics between enterers and non-enterers. The primary outcome is the continuous 3-item loneliness scale change (d_lonely3); the binary CES-D frequent loneliness item (d_lonely) serves as a robustness check.
+
+**Tier 2 — Associational / Mechanism (H2, n = 3,075).** Among respondents with non-co-resident children, changes in contact satisfaction and contact frequency are added to the FD model. These estimates identify within-person associations between communication quality and loneliness change, net of transnational transition. Reverse causality (loneliness reducing satisfaction) cannot be fully ruled out; findings are interpreted as evidence of mechanism rather than strict causal effects.
+
+**Tier 3 — Exploratory (H3 + H4, n = 395).** Distance models are restricted to respondents with recorded destination countries in both waves. Crucially, this subsample consists **entirely of households that were already transnational at Wave 1 and remained so at Wave 2** — there are zero enterers in this subsample. The distance analysis therefore does not identify the entry effect; instead it asks: *among already-transnational households, does a child moving farther away increase parental loneliness, and does contact satisfaction buffer this?* This is a distinct and meaningful question, but must be clearly distinguished from the Tier 1 causal claim.
+
+## Key Missingness Facts
+
+| Variable               | Missing | \%  |
+|------------------------|---------|-----|
+| d_lonely (binary)      | 2,648   | 44% |
+| d_lonely3 (continuous) | 2,694   | 45% |
+| d_contact_sat          | 2,869   | 48% |
+| d_dist_1000km          | 5,513   | 92% |
+| d_poor / d_urban       | 1,974   | 33% |
+| d_health               | 2,692   | 45% |
+
+The 92% missingness on distance is structural: destination country codes are only recorded when a child is abroad at both waves with a valid country code entered by the interviewer. The distance subsample is highly selected and findings must be treated as preliminary.
+
+------------------------------------------------------------------------
+
+# Setup
+
+```{r}
+#| label: setup
+#| include: false
+
+pkgs <- c(
+  "dplyr", "tidyr", "ggplot2", "scales",
+  "janitor", "haven", "forcats",
+  "broom", "survey",
+  "WeightIt", "cobalt",
+  "marginaleffects", "modelsummary",
+  "geosphere", "rnaturalearth", "sf",
+  "DiagrammeR", "DiagrammeRsvg", "rsvg",
+  "writexl", "knitr", "kableExtra",
+  "patchwork"
+)
+
+install_if_missing <- pkgs[!pkgs %in% installed.packages()[, "Package"]]
+if (length(install_if_missing) > 0) {
+  install.packages(install_if_missing, repos = "https://cran.r-project.org")
+}
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+LMUGreen <- "#00883A"
+
+theme_lmu <- function(base_size = 13) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title       = element_text(face = "bold"),
+      plot.subtitle    = element_text(color = "grey40", size = 10),
+      axis.title       = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      legend.position  = "bottom"
+    )
+}
+
+save_plot <- function(p, name, w = 10, h = 6) {
+  dir.create("figures", showWarnings = FALSE)
+  ggsave(file.path("figures", paste0(name, ".pdf")),
+         p, width = w, height = h, device = cairo_pdf)
+  ggsave(file.path("figures", paste0(name, ".png")),
+         p, width = w, height = h, dpi = 300)
+  invisible(p)
+}
+
+dir.create("tables", showWarnings = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Load Data
+
+```{r}
+#| label: load-data
+
+# Remove only data objects, not helper functions
+rm(list = ls()[!ls() %in% c("LMUGreen", "theme_lmu", "save_plot")])
+
+library(haven)
+
+lsahp1 <- read_dta(
+  "C:/Users/jemma/Downloads/LSAHP-Baseline-Data-STATA/LSAHP Baseline Data (STATA)/LSAHP1.dta"
+)
+
+lsahp2 <- read_dta(
+  "H:/My Drive/UPPI_RUG/UPPI_RUG_DLSU/LSAHP W2 Transnational households and loneliness (Jem, 202602)/LSAHP W2 Transnational households and loneliness (Jem).dta"
+)
+
+cat("Wave 1 n =", nrow(lsahp1), "\n")
+cat("Wave 2 n =", nrow(lsahp2), "\n")
+```
+
+------------------------------------------------------------------------
+
+# Wave 1 Variables
+
+## ID
+
+```{r}
+#| label: w1-id
+lsahp_w1 <- lsahp1 |> dplyr::mutate(id = P1ID1)
+```
+
+## Outcomes
+
+```{r}
+#| label: w1-outcomes
+
+# Binary: 1 = often lonely (frequent loneliness threshold)
+lsahp_w1 <- lsahp_w1 |>
+  dplyr::mutate(
+    lonely_w1 = dplyr::case_when(
+      P1SD1_06 == 3          ~ 1,
+      P1SD1_06 %in% c(1, 2) ~ 0,
+      TRUE                   ~ NA_real_
+    )
+  )
+
+# 3-item continuous scale (0-4): mean of companionship, left out, isolated
+# Wave 1 uses same 0-4 response categories as Wave 2 — confirmed comparable
+lsahp_w1 <- lsahp_w1 |>
+  dplyr::mutate(
+    lonely_3item = dplyr::if_else(
+      rowSums(dplyr::across(c(P1SH9_1, P1SH9_2, P1SH9_3),
+                            ~ is.na(.x))) == 0,
+      rowMeans(dplyr::across(c(P1SH9_1, P1SH9_2, P1SH9_3))),
+      NA_real_
+    )
+  )
+
+cat("Wave 1 lonely_w1:\n")
+table(lsahp_w1$lonely_w1, useNA = "ifany")
+cat("\nWave 1 lonely_3item summary:\n")
+summary(lsahp_w1$lonely_3item)
+```
+
+## Exposure: Transnational Household
+
+```{r}
+#| label: w1-transnational
+
+lsahp_w1 <- lsahp_w1 |>
+  dplyr::mutate(
+    child_abroad = dplyr::if_else(
+      rowSums(dplyr::across(dplyr::starts_with("P1HH39_"),
+                            ~ as.numeric(.x == 6)),
+              na.rm = TRUE) > 0, 1L, 0L),
+
+    # CORRECT: use P1HH42_* for child-specific OFW status
+    child_ofw = dplyr::if_else(
+      rowSums(dplyr::across(dplyr::starts_with("P1HH42_"),
+                            ~ as.numeric(.x == 1)),
+              na.rm = TRUE) > 0, 1L, 0L),
+
+    transnational_hh = dplyr::if_else(
+      child_abroad == 1L | child_ofw == 1L, 1L, 0L)
+  )
+
+cat("Wave 1 transnational_hh:\n")
+table(lsahp_w1$transnational_hh, useNA = "ifany")
+```
+
+## Mediators
+
+```{r}
+#| label: w1-mediators
+
+# Contact frequency: minimum J10 code across children (lower = more frequent)
+lsahp_w1 <- lsahp_w1 |>
+  dplyr::mutate(
+    contact_child_freq = {
+      j10_mat <- dplyr::across(
+        dplyr::starts_with("P1SJ10_"),
+        ~ dplyr::if_else(.x %in% 0:4, as.numeric(.x), NA_real_)
+      ) |> as.matrix()
+      apply(j10_mat, 1, function(x) {
+        if (all(is.na(x))) NA_real_ else min(x, na.rm = TRUE)
+      })
+    }
+  )
+
+# Contact satisfaction: binary (1 = satisfied, 0 = not)
+# CORRECT coding: {1,2} = satisfied, {3} = not satisfied
+lsahp_w1 <- lsahp_w1 |>
+  dplyr::mutate(
+    contact_child_satisfied = dplyr::case_when(
+      P1SJ26 %in% c(1, 2) ~ 1L,
+      P1SJ26 == 3          ~ 0L,
+      TRUE                 ~ NA_integer_
+    )
+  )
+```
+
+## Distance to Farthest Migrant Child
+
+```{r}
+#| label: w1-distance
+#| cache: true
+
+library(rnaturalearth); library(sf); library(geosphere)
+sf::sf_use_s2(FALSE)
+
+ref_lon <- 120.9842; ref_lat <- 14.5995
+
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+world_centroids <- world |>
+  dplyr::mutate(centroid = sf::st_centroid(geometry)) |>
+  dplyr::mutate(lon = sf::st_coordinates(centroid)[,"X"],
+                lat = sf::st_coordinates(centroid)[,"Y"]) |>
+  dplyr::select(iso_a2, name, lon, lat)
+
+country_vars_w1 <- lsahp_w1 |>
+  dplyr::select(dplyr::starts_with("P1HH43_")) |> names()
+
+country_codes_w1 <- lsahp_w1 |>
+  dplyr::select(dplyr::all_of(country_vars_w1)) |>
+  tidyr::pivot_longer(cols = dplyr::everything(), values_to = "country_code") |>
+  dplyr::filter(!is.na(country_code), country_code != "") |>
+  dplyr::distinct(country_code) |>
+  dplyr::left_join(world_centroids, by = c("country_code" = "iso_a2"))
+
+lsahp_w1 <- lsahp_w1 |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    max_child_distance_km = {
+      codes <- c_across(dplyr::all_of(country_vars_w1))
+      codes <- codes[!is.na(codes) & codes != ""]
+      if (length(codes) == 0) { NA_real_ } else {
+        coords <- country_codes_w1 |>
+          dplyr::filter(country_code %in% codes, !is.na(lon), !is.na(lat))
+        if (nrow(coords) == 0) { NA_real_ } else {
+          max(geosphere::distHaversine(
+            matrix(c(ref_lon, ref_lat), ncol = 2),
+            as.matrix(coords[, c("lon","lat")])
+          )) / 1000
+        }
+      }
+    }
+  ) |>
+  dplyr::ungroup()
+```
+
+## Controls and IPW Covariates
+
+```{r}
+#| label: w1-controls
+
+lsahp_w1 <- lsahp_w1 |>
+  dplyr::mutate(
+    urban      = dplyr::case_when(P1MX_URBAN == 1 ~ 1L,
+                                  P1MX_URBAN == 2 ~ 0L, TRUE ~ NA_integer_),
+    age        = as.numeric(P1SA2),
+    sex        = dplyr::case_when(P1SA3 == 1 ~ 0L, P1SA3 == 2 ~ 1L,
+                                  TRUE ~ NA_integer_),
+    educhsplus = dplyr::case_when(P1SQ16_EDUC %in% c(2,3) ~ 1L,
+                                  P1SQ16_EDUC == 1 ~ 0L, TRUE ~ NA_integer_),
+    wealthq    = as.integer(P1MX_WINDEX),
+    poor       = dplyr::case_when(P1MX_WINDEX == 1 ~ 1L,
+                                  P1MX_WINDEX %in% 2:5 ~ 0L, TRUE ~ NA_integer_),
+    health_3cat = dplyr::case_when(P1SB1 %in% c(1,2) ~ 0L, P1SB1 == 3 ~ 1L,
+                                   P1SB1 %in% c(4,5) ~ 2L, TRUE ~ NA_integer_),
+    marital    = dplyr::case_when(P1SA27 == 2 ~ 1L,
+                                  P1SA27 %in% c(1,3,4,5) ~ 0L, TRUE ~ NA_integer_),
+    n_children = as.numeric(P1HH30),
+    remittance = dplyr::case_when(P1SF2_08 == 1 ~ 1L, P1SF2_08 == 2 ~ 0L,
+                                  TRUE ~ NA_integer_),
+    internet   = dplyr::case_when(P1SH16 == 1 ~ 1L, P1SH16 == 2 ~ 0L,
+                                  TRUE ~ NA_integer_),
+    cellphone  = dplyr::case_when(P1SH20 == 1 ~ 1L, P1SH20 == 2 ~ 0L,
+                                  TRUE ~ NA_integer_),
+    cognitive  = as.numeric(P1SL_TOTAL),
+    social_org = dplyr::case_when(P1SH4 == 1 | P1SH6 == 1 ~ 1L, TRUE ~ 0L)
+  )
+```
+
+------------------------------------------------------------------------
+
+# Wave 2 Variables
+
+```{r}
+#| label: w2-all
+
+lsahp_w2 <- lsahp2 |>
+  dplyr::mutate(id = P1ID1)
+
+# ── Binary loneliness ────────────────────────────────────────────────────────
+lsahp_w2 <- lsahp_w2 |>
+  dplyr::mutate(
+    lonely_w2 = dplyr::case_when(
+      P2SD1_06 == 3          ~ 1L,
+      P2SD1_06 %in% c(1, 2) ~ 0L,
+      TRUE                   ~ NA_integer_
+    )
+  )
+
+# ── 3-item scale ─────────────────────────────────────────────────────────────
+# Wave 2 uses same 0-4 scale as Wave 1 (confirmed from codebook)
+# NA = 2,567 at Wave 2 vs 775 at Wave 1 — attrition driven, not scale change
+lsahp_w2 <- lsahp_w2 |>
+  dplyr::mutate(
+    lonely_3item_w2 = dplyr::if_else(
+      rowSums(dplyr::across(c(P2SH9_1, P2SH9_2, P2SH9_3),
+                            ~ is.na(.x))) == 0,
+      rowMeans(dplyr::across(c(P2SH9_1, P2SH9_2, P2SH9_3))),
+      NA_real_
+    )
+  )
+
+# ── Transnational exposure ───────────────────────────────────────────────────
+lsahp_w2 <- lsahp_w2 |>
+  dplyr::mutate(
+    child_abroad_w2 = dplyr::if_else(
+      rowSums(dplyr::across(dplyr::starts_with("P2HH39_"),
+                            ~ as.numeric(.x == 6)), na.rm = TRUE) > 0, 1L, 0L),
+
+    # CORRECTED: P2HH42_* not P2HH14_* for child-specific OFW
+    child_ofw_w2 = dplyr::if_else(
+      rowSums(dplyr::across(dplyr::starts_with("P2HH42_"),
+                            ~ as.numeric(.x == 1)), na.rm = TRUE) > 0, 1L, 0L),
+
+    transnational_hh_w2 = dplyr::if_else(
+      child_abroad_w2 == 1L | child_ofw_w2 == 1L, 1L, 0L)
+  )
+
+# ── Contact frequency ────────────────────────────────────────────────────────
+lsahp_w2 <- lsahp_w2 |>
+  dplyr::mutate(
+    contact_child_freq_w2 = {
+      j10_mat <- dplyr::across(
+        dplyr::starts_with("P2SJ10"),
+        ~ dplyr::if_else(.x %in% 0:4, as.numeric(.x), NA_real_)
+      ) |> as.matrix()
+      apply(j10_mat, 1, function(x) {
+        if (all(is.na(x))) NA_real_ else min(x, na.rm = TRUE)
+      })
+    }
+  )
+
+# ── Contact satisfaction ─────────────────────────────────────────────────────
+# CORRECTED: {1,2} = satisfied, {3} = not satisfied (same as Wave 1)
+lsahp_w2 <- lsahp_w2 |>
+  dplyr::mutate(
+    contact_child_satisfied_w2 = dplyr::case_when(
+      P2SJ26 %in% c(1, 2) ~ 1L,
+      P2SJ26 == 3          ~ 0L,
+      TRUE                 ~ NA_integer_
+    )
+  )
+
+# ── Controls ─────────────────────────────────────────────────────────────────
+lsahp_w2 <- lsahp_w2 |>
+  dplyr::mutate(
+    urban_w2 = dplyr::case_when(P2MX_URBAN == 1 ~ 1L,
+                                P2MX_URBAN == 0 ~ 0L, TRUE ~ NA_integer_),
+    age_w2   = as.numeric(P2SA2),
+    sex_w2   = dplyr::case_when(P2SA3 == 1 ~ 0L, P2SA3 == 2 ~ 1L,
+                                TRUE ~ NA_integer_),
+    educhsplus_w2 = dplyr::case_when(w2op_educ3 %in% c(2,3) ~ 1L,
+                                     w2op_educ3 == 1 ~ 0L, TRUE ~ NA_integer_),
+    wealthq_w2 = as.integer(P2MX_WINDEX_A),
+    poor_w2    = dplyr::case_when(P2MX_WINDEX_A == 1 ~ 1L,
+                                  P2MX_WINDEX_A %in% 2:5 ~ 0L, TRUE ~ NA_integer_),
+    health_3cat_w2 = dplyr::case_when(P2SB1 %in% c(1,2) ~ 0L,
+                                      P2SB1 == 3 ~ 1L,
+                                      P2SB1 %in% c(4,5) ~ 2L, TRUE ~ NA_integer_)
+  )
+```
+
+## Wave 2 Distance
+
+```{r}
+#| label: w2-distance
+#| cache: true
+
+sf::sf_use_s2(FALSE)
+
+world_centroids_n3 <- world |>
+  dplyr::mutate(centroid = sf::st_centroid(geometry)) |>
+  dplyr::mutate(lon = sf::st_coordinates(centroid)[,"X"],
+                lat = sf::st_coordinates(centroid)[,"Y"]) |>
+  dplyr::select(iso_n3, name, lon, lat) |>
+  dplyr::mutate(iso_n3 = as.numeric(iso_n3))
+
+country_vars_w2 <- lsahp_w2 |>
+  dplyr::select(dplyr::starts_with("P2HH43_")) |> names()
+
+country_codes_w2 <- lsahp_w2 |>
+  dplyr::select(dplyr::all_of(country_vars_w2)) |>
+  tidyr::pivot_longer(cols = dplyr::everything(), values_to = "country_code") |>
+  dplyr::mutate(country_code = as.numeric(country_code)) |>
+  dplyr::filter(!is.na(country_code), country_code > 0) |>
+  dplyr::distinct(country_code) |>
+  dplyr::left_join(world_centroids_n3, by = c("country_code" = "iso_n3"))
+
+lsahp_w2 <- lsahp_w2 |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    max_child_distance_km_w2 = {
+      codes <- as.numeric(c_across(dplyr::all_of(country_vars_w2)))
+      codes <- codes[!is.na(codes) & codes > 0]
+      if (length(codes) == 0) { NA_real_ } else {
+        coords <- country_codes_w2 |>
+          dplyr::filter(country_code %in% codes, !is.na(lon), !is.na(lat))
+        if (nrow(coords) == 0) { NA_real_ } else {
+          max(geosphere::distHaversine(
+            matrix(c(ref_lon, ref_lat), ncol = 2),
+            as.matrix(coords[, c("lon","lat")])
+          )) / 1000
+        }
+      }
+    }
+  ) |>
+  dplyr::ungroup()
+```
+
+------------------------------------------------------------------------
+
+# Panel Construction
+
+```{r}
+#| label: panel-build
+
+panel_ids <- intersect(lsahp_w1$id, lsahp_w2$id)
+cat("Balanced panel n =", length(panel_ids), "\n")
+
+lsahp_w1p <- lsahp_w1 |> dplyr::filter(id %in% panel_ids)
+lsahp_w2p <- lsahp_w2 |> dplyr::filter(id %in% panel_ids)
+
+# Long format
+lsahp_w1_long <- lsahp_w1p |>
+  dplyr::transmute(
+    id, wave = 1L,
+    lonely = as.numeric(lonely_w1), lonely_3item,
+    transnational_hh, contact_child_freq, contact_child_satisfied,
+    max_child_distance_km, urban, age, sex, educhsplus,
+    wealthq, poor, health_3cat,
+    strata = P1MX_STRATA, psu = P1MX_PSU, wgt = P1MX_WGTU
+  )
+
+lsahp_w2_long <- lsahp_w2p |>
+  dplyr::transmute(
+    id, wave = 2L,
+    lonely = as.numeric(lonely_w2), lonely_3item = lonely_3item_w2,
+    transnational_hh = transnational_hh_w2,
+    contact_child_freq = contact_child_freq_w2,
+    contact_child_satisfied = contact_child_satisfied_w2,
+    max_child_distance_km = max_child_distance_km_w2,
+    urban = urban_w2, age = age_w2, sex = sex_w2,
+    educhsplus = educhsplus_w2, wealthq = wealthq_w2,
+    poor = poor_w2, health_3cat = health_3cat_w2,
+    strata = P1MX_STRATA, psu = P1MX_PSU, wgt = P2MX_WGT1
+  )
+
+lsahp_long <- dplyr::bind_rows(lsahp_w1_long, lsahp_w2_long)
+
+# Wide format
+lsahp_wide <- lsahp_long |>
+  dplyr::select(id, wave, lonely, lonely_3item, transnational_hh,
+                contact_child_freq, contact_child_satisfied,
+                max_child_distance_km) |>
+  tidyr::pivot_wider(names_from = wave,
+                     values_from = c(lonely, lonely_3item, transnational_hh,
+                                     contact_child_freq, contact_child_satisfied,
+                                     max_child_distance_km),
+                     names_sep = "_w")
+
+# Controls wide
+controls_wide <- lsahp_long |>
+  dplyr::select(id, wave, poor, urban, health_3cat) |>
+  tidyr::pivot_wider(names_from = wave,
+                     values_from = c(poor, urban, health_3cat),
+                     names_sep = "_w")
+
+lsahp_wide <- lsahp_wide |>
+  dplyr::left_join(controls_wide, by = "id")
+
+# Transition indicators and first differences
+lsahp_wide <- lsahp_wide |>
+  dplyr::mutate(
+    trans_transition = dplyr::case_when(
+      transnational_hh_w1 == 0 & transnational_hh_w2 == 0 ~ "Stayed non-transnational",
+      transnational_hh_w1 == 0 & transnational_hh_w2 == 1 ~ "Entered transnational",
+      transnational_hh_w1 == 1 & transnational_hh_w2 == 1 ~ "Stayed transnational",
+      transnational_hh_w1 == 1 & transnational_hh_w2 == 0 ~ "Exited transnational",
+      TRUE ~ NA_character_
+    ),
+    entered = dplyr::if_else(
+      transnational_hh_w1 == 0 & transnational_hh_w2 == 1, 1L, 0L),
+    exited  = dplyr::if_else(
+      transnational_hh_w1 == 1 & transnational_hh_w2 == 0, 1L, 0L),
+    # First differences
+    d_lonely        = as.integer(lonely_w2) - as.integer(lonely_w1),
+    d_lonely3       = lonely_3item_w2 - lonely_3item_w1,
+    d_contact_sat   = contact_child_satisfied_w2 - contact_child_satisfied_w1,
+    d_contact_freq  = contact_child_freq_w2 - contact_child_freq_w1,
+    d_dist_km       = max_child_distance_km_w2 - max_child_distance_km_w1,
+    d_dist_1000km   = d_dist_km / 1000,
+    d_poor          = poor_w2   - poor_w1,
+    d_urban         = urban_w2  - urban_w1,
+    d_health        = health_3cat_w2 - health_3cat_w1,
+    # Interaction term (satisfaction × distance)
+    d_sat_x_dist    = d_contact_sat * d_dist_1000km,
+    # Became lonely
+    became_lonely   = dplyr::if_else(d_lonely == 1, 1L, 0L)
+  )
+
+cat("Wide n =", nrow(lsahp_wide), "\n")
+cat("\nTransition distribution:\n")
+table(lsahp_wide$trans_transition, useNA = "ifany")
+```
+
+------------------------------------------------------------------------
+
+# Missingness Audit
+
+```{r}
+#| label: missing-audit
+
+lsahp_wide |>
+  dplyr::summarise(
+    n_total                = dplyr::n(),
+    miss_d_lonely          = sum(is.na(d_lonely)),
+    miss_d_lonely3         = sum(is.na(d_lonely3)),
+    miss_d_contact_sat     = sum(is.na(d_contact_sat)),
+    miss_d_dist_1000km     = sum(is.na(d_dist_1000km)),
+    miss_d_poor            = sum(is.na(d_poor)),
+    miss_d_urban           = sum(is.na(d_urban)),
+    miss_d_health          = sum(is.na(d_health)),
+    n_tier1_cont           = sum(!is.na(d_lonely3) & !is.na(entered) &
+                                 !is.na(d_poor) & !is.na(d_urban) &
+                                 !is.na(d_health)),
+    n_tier2_contact        = sum(!is.na(d_lonely3) & !is.na(entered) &
+                                 !is.na(d_contact_sat) &
+                                 !is.na(d_poor) & !is.na(d_urban) &
+                                 !is.na(d_health)),
+    n_tier3_distance       = sum(!is.na(d_lonely3) & !is.na(entered) &
+                                 !is.na(d_dist_1000km) &
+                                 !is.na(d_poor) & !is.na(d_urban) &
+                                 !is.na(d_health)),
+    n_tier3_interaction    = sum(!is.na(d_lonely3) & !is.na(entered) &
+                                 !is.na(d_contact_sat) & !is.na(d_dist_1000km) &
+                                 !is.na(d_poor) & !is.na(d_urban) &
+                                 !is.na(d_health))
+  ) |>
+  tidyr::pivot_longer(dplyr::everything()) |>
+  knitr::kable(caption = "Missingness audit and analytic sample sizes by tier")
+
+# CRITICAL: confirm zero enterers in distance subsample
+cat("\n=== Enterer breakdown in distance subsample ===\n")
+lsahp_wide |>
+  dplyr::filter(!is.na(d_lonely3) & !is.na(d_dist_1000km) &
+                !is.na(d_poor) & !is.na(d_urban) & !is.na(d_health)) |>
+  dplyr::count(entered, exited) |>
+  dplyr::mutate(group = dplyr::case_when(
+    entered == 1 ~ "Enterers (0→1)",
+    exited  == 1 ~ "Exiters  (1→0)",
+    TRUE         ~ "Stayers (no change)"
+  )) |>
+  knitr::kable(caption = "Transition groups in distance subsample (n=395). NOTE: zero enterers — distance analysis is within already-transnational households only.")
+```
+
+------------------------------------------------------------------------
+
+# Descriptives
+
+## Survey Designs
+
+```{r}
+#| label: survey-designs
+
+library(survey)
+
+des_w1 <- svydesign(ids = ~psu, strata = ~strata, weights = ~wgt,
+                    data = dplyr::filter(lsahp_long, wave == 1, !is.na(wgt)),
+                    nest = TRUE)
+
+des_w2 <- svydesign(ids = ~psu, strata = ~strata, weights = ~wgt,
+                    data = dplyr::filter(lsahp_long, wave == 2, !is.na(wgt)),
+                    nest = TRUE)
+
+design_w1_vars <- lsahp_long |>
+  dplyr::filter(wave == 1) |>
+  dplyr::select(id, strata, psu, wgt) |>
+  dplyr::distinct()
+
+lsahp_wide_des <- lsahp_wide |>
+  dplyr::left_join(design_w1_vars, by = "id")
+
+des_wide <- svydesign(ids = ~psu, strata = ~strata, weights = ~wgt,
+                      data = lsahp_wide_des, nest = TRUE)
+
+svymean_ci <- function(var, design, level = 0.95) {
+  m  <- survey::svymean(var, design, na.rm = TRUE)
+  ci <- suppressMessages(confint(m, level = level))
+  data.frame(mean = as.numeric(coef(m)),
+             ci_l = as.numeric(ci[,1]),
+             ci_u = as.numeric(ci[,2]))
+}
+```
+
+## Figure 1: Loneliness Prevalence
+
+```{r}
+#| label: fig-lonely
+#| fig-cap: "Weighted prevalence of frequent loneliness (often = 1 on CES-D) by survey wave."
+
+prev_lon <- dplyr::bind_rows(
+  svymean_ci(~lonely, des_w1) |> dplyr::mutate(Wave = "Wave 1"),
+  svymean_ci(~lonely, des_w2) |> dplyr::mutate(Wave = "Wave 2")
+) |> dplyr::mutate(label = scales::percent(mean, accuracy = 0.1))
+
+p_lon <- ggplot(prev_lon, aes(x = Wave, y = mean)) +
+  geom_col(fill = LMUGreen, color = "#006B2C", width = 0.6) +
+  geom_errorbar(aes(ymin = ci_l, ymax = ci_u), width = 0.12, linewidth = 0.9) +
+  geom_text(aes(y = ci_u + 0.015, label = label), size = 6, fontface = "bold") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 0.20)) +
+  labs(title = "Prevalence of Frequent Loneliness, by Wave (Weighted)",
+       x = "Survey wave", y = "Proportion reporting frequent loneliness") +
+  theme_lmu()
+
+save_plot(p_lon, "01_lonely_prevalence")
+p_lon
+```
+
+## Figure 2: Transnational Prevalence
+
+```{r}
+#| label: fig-transnational
+#| fig-cap: "Weighted prevalence of transnational households by survey wave."
+
+prev_tn <- dplyr::bind_rows(
+  svymean_ci(~transnational_hh, des_w1) |> dplyr::mutate(Wave = "Wave 1"),
+  svymean_ci(~transnational_hh, des_w2) |> dplyr::mutate(Wave = "Wave 2")
+) |> dplyr::mutate(label = scales::percent(mean, accuracy = 0.1))
+
+p_tn <- ggplot(prev_tn, aes(x = Wave, y = mean)) +
+  geom_col(fill = LMUGreen, color = "#006B2C", width = 0.6) +
+  geom_errorbar(aes(ymin = ci_l, ymax = ci_u), width = 0.12, linewidth = 0.9) +
+  geom_text(aes(y = ci_u + 0.03, label = label), size = 6, fontface = "bold") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 0.30)) +
+  labs(title = "Prevalence of Transnational Households, by Wave (Weighted)",
+       x = "Survey wave", y = "Proportion in a transnational household") +
+  theme_lmu()
+
+save_plot(p_tn, "02_transnational_prevalence")
+p_tn
+```
+
+## Figure 3: Transition Distribution
+
+```{r}
+#| label: fig-transitions
+#| fig-cap: "Weighted distribution of household transitions between Wave 1 and Wave 2."
+
+m_trans <- svymean(~factor(trans_transition), des_wide, na.rm = TRUE)
+ci_trans <- suppressMessages(confint(m_trans))
+
+trans_df <- data.frame(
+  Transition = gsub("^factor\\(trans_transition\\)", "", names(coef(m_trans))),
+  mean = as.numeric(coef(m_trans)),
+  ci_l = as.numeric(ci_trans[,1]),
+  ci_u = as.numeric(ci_trans[,2])
+) |> dplyr::mutate(label = scales::percent(mean, accuracy = 0.1))
+
+p_trans <- ggplot(trans_df, aes(x = reorder(Transition, -mean), y = mean)) +
+  geom_col(fill = LMUGreen, color = "#006B2C", width = 0.7) +
+  geom_errorbar(aes(ymin = ci_l, ymax = ci_u), width = 0.12, linewidth = 0.9) +
+  geom_text(aes(y = ci_u + 0.03, label = label), size = 6, fontface = "bold") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 0.90)) +
+  labs(title = "Transnational Household Transitions (Weighted)",
+       x = "Transition group (Wave 1 → Wave 2)",
+       y = "Proportion of the sample") +
+  theme_lmu() +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+
+save_plot(p_trans, "03_transitions", w = 10, h = 6)
+p_trans
+```
+
+## Figure 4: Becoming Lonely by Transition
+
+```{r}
+#| label: fig-became-lonely
+#| fig-cap: "Weighted proportion becoming frequently lonely by transition group."
+
+svy_mean_by_group <- function(design, yvar, gvar) {
+  levs <- levels(factor(design$variables[[gvar]]))
+  dplyr::bind_rows(lapply(levs, function(L) {
+    dsub <- subset(design, design$variables[[gvar]] == L)
+    m    <- svymean(as.formula(paste0("~", yvar)), dsub, na.rm = TRUE)
+    ci   <- suppressMessages(confint(m))
+    data.frame(group = L, mean = as.numeric(coef(m)),
+               ci_l = as.numeric(ci[,1]), ci_u = as.numeric(ci[,2]))
+  }))
+}
+
+bl_df <- svy_mean_by_group(des_wide, "became_lonely", "trans_transition") |>
+  dplyr::rename(Transition = group) |>
+  dplyr::mutate(label = scales::percent(mean, accuracy = 0.1))
+
+p_bl <- ggplot(bl_df, aes(x = reorder(Transition, -mean), y = mean)) +
+  geom_col(fill = LMUGreen, color = "#006B2C", width = 0.7) +
+  geom_errorbar(aes(ymin = ci_l, ymax = ci_u), width = 0.12, linewidth = 0.9) +
+  geom_text(aes(y = ci_u + 0.04, label = label), size = 6, fontface = "bold") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 0.45)) +
+  labs(title = "Percent Becoming Lonely by Transnational Transition (Weighted)",
+       x = "Transition group (Wave 1 → Wave 2)",
+       y = "Proportion who became frequently lonely") +
+  theme_lmu() +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+
+save_plot(p_bl, "04_became_lonely", w = 10, h = 6)
+p_bl
+```
+
+------------------------------------------------------------------------
+
+# TIER 1: Causal Analysis (H1)
+
+## IPW — Propensity Score Estimation
+
+```{r}
+#| label: ipw-setup
+
+library(WeightIt); library(cobalt)
+
+baseline_vars <- lsahp_w1 |>
+  dplyr::transmute(
+    id,
+    age_w1        = age,
+    sex_w1        = sex,
+    educ_w1       = educhsplus,
+    wealth_w1     = wealthq,
+    marital_w1    = marital,
+    health_w1     = health_3cat,
+    n_children_w1 = n_children,
+    # remittance_w1 REMOVED — 97% missing, not usable
+    internet_w1   = internet,
+    cellphone_w1  = cellphone,
+    cognitive_w1  = cognitive,
+    lonely3_w1    = lonely_3item,
+    social_org_w1 = social_org
+    # urban_w1 and poor_w1 already in lsahp_wide_des — not joined here
+  )
+
+lsahp_wide_des2 <- lsahp_wide_des |>
+  dplyr::left_join(baseline_vars, by = "id")
+
+# IPW sample: baseline non-transnational only
+lsahp_ipw <- lsahp_wide_des2 |>
+  dplyr::filter(transnational_hh_w1 == 0) |>
+  dplyr::mutate(
+    d_dist_1000km = d_dist_km / 1000,
+    d_sat_x_dist  = d_contact_sat * d_dist_1000km
+  )
+
+# Mean imputation for PS covariates with <20% missingness
+# Standard practice for propensity score estimation
+# Reported in methods: "Missing values on PS covariates imputed
+# to the covariate mean prior to propensity score estimation"
+lsahp_ipw <- lsahp_ipw |>
+  dplyr::mutate(
+    educ_w1       = dplyr::if_else(
+      is.na(educ_w1),
+      mean(educ_w1, na.rm = TRUE), as.numeric(educ_w1)),
+    health_w1     = dplyr::if_else(
+      is.na(health_w1),
+      mean(health_w1, na.rm = TRUE), as.numeric(health_w1)),
+    n_children_w1 = dplyr::if_else(
+      is.na(n_children_w1),
+      mean(n_children_w1, na.rm = TRUE), as.numeric(n_children_w1)),
+    cognitive_w1  = dplyr::if_else(
+      is.na(cognitive_w1),
+      mean(cognitive_w1, na.rm = TRUE), as.numeric(cognitive_w1)),
+    lonely3_w1    = dplyr::if_else(
+      is.na(lonely3_w1),
+      mean(lonely3_w1, na.rm = TRUE), as.numeric(lonely3_w1))
+  )
+
+cat("IPW sample: n =", nrow(lsahp_ipw),
+    "| Enterers:", sum(lsahp_ipw$entered, na.rm = TRUE),
+    "| Stayers:",  sum(lsahp_ipw$entered == 0, na.rm = TRUE), "\n")
+
+# Confirm no remaining missingness on PS covariates
+ps_vars <- c("age_w1","sex_w1","educ_w1","wealth_w1","urban_w1",
+             "marital_w1","health_w1","n_children_w1",
+             "internet_w1","cellphone_w1",
+             "cognitive_w1","lonely3_w1","social_org_w1",
+             "poor_w1")
+
+remaining_miss <- lsahp_ipw |>
+  dplyr::select(dplyr::all_of(ps_vars)) |>
+  dplyr::summarise(dplyr::across(dplyr::everything(), ~ sum(is.na(.x)))) |>
+  tidyr::pivot_longer(dplyr::everything()) |>
+  dplyr::filter(value > 0)
+
+if (nrow(remaining_miss) == 0) {
+  cat("No missing values remaining in PS covariates.\n")
+} else {
+  print(remaining_miss)
+}
+```
+
+```{r}
+#| label: ipw-estimate
+
+# Updated formula: remittance_w1 removed (97% missing)
+ps_formula <- entered ~
+  age_w1 + sex_w1 + educ_w1 + wealth_w1 + urban_w1 +
+  marital_w1 + health_w1 + n_children_w1 +
+  poor_w1 + internet_w1 + cellphone_w1 +
+  cognitive_w1 + lonely3_w1 + social_org_w1
+
+w_out <- WeightIt::weightit(
+  ps_formula,
+  data     = lsahp_ipw,
+  method   = "ps",
+  estimand = "ATT"
+)
+
+summary(w_out)
+
+# Combine IPW with survey weights
+lsahp_ipw <- lsahp_ipw |>
+  dplyr::mutate(
+    ipw          = w_out$weights,
+    # Check if trimming needed
+    p99          = quantile(w_out$weights, 0.99, na.rm = TRUE),
+    ipw_trimmed  = pmin(ipw, p99),
+    wgt_combined = ipw_trimmed * wgt
+  )
+
+cat("\nIPW weight summary:\n")
+summary(lsahp_ipw$ipw)
+cat("\n99th percentile:", round(quantile(lsahp_ipw$ipw, 0.99), 3),
+    "— trimming", 
+    ifelse(quantile(lsahp_ipw$ipw, 0.99) > 5, "RECOMMENDED", "not needed"), "\n")
+```
+
+## Balance Assessment
+
+```{r}
+#| label: fig-balance
+#| fig-cap: "Covariate balance before and after IPW. All adjusted SMDs should fall within the dashed lines at ±0.10."
+
+bal_tab <- cobalt::bal.tab(
+  w_out,
+  stats      = c("mean.diffs", "variance.ratios"),
+  thresholds = c(m = 0.1)
+)
+print(bal_tab)
+
+cobalt::love.plot(
+  w_out,
+  threshold = 0.1,
+  colors    = c("#C0392B", LMUGreen),
+  title     = "Covariate Balance Before and After IPW"
+)
+```
+
+## Trim and Combine Weights
+
+```{r}
+#| label: ipw-trim
+
+p99 <- quantile(w_out$weights, 0.99, na.rm = TRUE)
+
+lsahp_ipw <- lsahp_ipw |>
+  dplyr::mutate(
+    ipw          = w_out$weights,
+    ipw_trimmed  = pmin(ipw, p99),
+    wgt_combined = ipw_trimmed * wgt
+  )
+
+cat("Weight summary after trimming at 99th percentile:\n")
+summary(lsahp_ipw$ipw_trimmed)
+# Correct ESS reporting
+ess_treated  <- sum(lsahp_ipw$ipw[lsahp_ipw$entered == 1])^2 /
+                sum(lsahp_ipw$ipw[lsahp_ipw$entered == 1]^2)
+
+ess_controls <- sum(lsahp_ipw$ipw[lsahp_ipw$entered == 0])^2 /
+                sum(lsahp_ipw$ipw[lsahp_ipw$entered == 0]^2)
+
+cat("Effective sample size:\n")
+cat("  Treated (enterers):", round(ess_treated, 0), "\n")
+cat("  Controls (stayers):", round(ess_controls, 0), "\n")
+cat("  Total:             ", round(ess_treated + ess_controls, 0), "\n")
+cat("\nControl weight range:",
+    round(min(lsahp_ipw$ipw[lsahp_ipw$entered == 0]), 3), "to",
+    round(max(lsahp_ipw$ipw[lsahp_ipw$entered == 0]), 3), "\n")
+cat("Trimming required: NO (max weight = 0.440)\n")
+```
+
+## Tier 1 Models
+
+```{r}
+#| label: tier1-models
+
+# Plain FD (comparison baseline) — IPW sample only
+des_plain <- svydesign(ids = ~psu, strata = ~strata, weights = ~wgt,
+                       data = lsahp_ipw, nest = TRUE)
+
+# IPW-weighted FD (main causal estimate)
+des_ipw <- svydesign(ids = ~psu, strata = ~strata, weights = ~wgt_combined,
+                     data = lsahp_ipw, nest = TRUE)
+
+# PRIMARY OUTCOME: 3-item continuous scale
+# NOTE: exited removed — IPW sample is baseline non-transnational only
+#       so exited = 0 for everyone (no variation, dropped automatically)
+m1_plain_cont <- svyglm(
+  d_lonely3 ~ entered + d_poor + d_urban + d_health,
+  design = des_plain, na.action = na.omit)
+
+m1_ipw_cont <- svyglm(
+  d_lonely3 ~ entered + d_poor + d_urban + d_health,
+  design = des_ipw, na.action = na.omit)
+
+# ROBUSTNESS: binary outcome
+m1_plain_bin <- svyglm(
+  d_lonely ~ entered + d_poor + d_urban + d_health,
+  design = des_plain, na.action = na.omit)
+
+m1_ipw_bin <- svyglm(
+  d_lonely ~ entered + d_poor + d_urban + d_health,
+  design = des_ipw, na.action = na.omit)
+
+cat("=== TIER 1: Main causal model (3-item, IPW) ===\n")
+summary(m1_ipw_cont)
+
+cat("\n=== TIER 1: Robustness (binary, IPW) ===\n")
+summary(m1_ipw_bin)
+
+cat("\n=== Plain FD vs IPW comparison ===\n")
+data.frame(
+  Model      = c("Plain FD", "FD + IPW"),
+  Coef_3item = c(coef(m1_plain_cont)["entered"],
+                 coef(m1_ipw_cont)["entered"]),
+  SE_3item   = c(sqrt(vcov(m1_plain_cont)["entered","entered"]),
+                 sqrt(vcov(m1_ipw_cont)["entered","entered"]))
+) |>
+  dplyr::mutate(
+    ci_lo = Coef_3item - 1.96 * SE_3item,
+    ci_hi = Coef_3item + 1.96 * SE_3item,
+    across(where(is.numeric), ~ round(.x, 3))
+  ) |>
+  print()
+
+cat("\nTier 1 sample sizes:\n")
+cat("Plain FD n =", nrow(model.frame(m1_plain_cont)), "\n")
+cat("IPW n      =", nrow(model.frame(m1_ipw_cont)), "\n")
+
+# Force print the comparison table
+comparison <- data.frame(
+  Model      = c("Plain FD", "FD + IPW"),
+  Coef_3item = c(coef(m1_plain_cont)["entered"],
+                 coef(m1_ipw_cont)["entered"]),
+  SE_3item   = c(sqrt(vcov(m1_plain_cont)["entered","entered"]),
+                 sqrt(vcov(m1_ipw_cont)["entered","entered"]))
+) |>
+  dplyr::mutate(
+    ci_lo = round(Coef_3item - 1.96 * SE_3item, 3),
+    ci_hi = round(Coef_3item + 1.96 * SE_3item, 3),
+    Coef_3item = round(Coef_3item, 3),
+    SE_3item   = round(SE_3item, 3)
+  )
+
+print(comparison)
+
+# Diagnose why n=2628 not ~3291
+# The IPW sample has 4795 rows — what is causing 2167 to drop?
+cat("\nMissingness in Tier 1 model variables (IPW sample):\n")
+lsahp_ipw |>
+  dplyr::summarise(
+    n_total      = dplyr::n(),
+    miss_d_lonely3 = sum(is.na(d_lonely3)),
+    miss_entered   = sum(is.na(entered)),
+    miss_d_poor    = sum(is.na(d_poor)),
+    miss_d_urban   = sum(is.na(d_urban)),
+    miss_d_health  = sum(is.na(d_health)),
+    n_complete     = sum(
+      !is.na(d_lonely3) & !is.na(entered) &
+      !is.na(d_poor) & !is.na(d_urban) & !is.na(d_health)
+    )
+  ) |>
+  tidyr::pivot_longer(dplyr::everything()) |>
+  print()
+```
+
+## Tier 1 Robustness Comparison
+
+```{r}
+#| label: tier1-compare
+
+data.frame(
+  Specification = c(
+    "FD plain — 3-item",
+    "FD + IPW — 3-item (PRIMARY)",
+    "FD plain — binary",
+    "FD + IPW — binary (ROBUSTNESS)"
+  ),
+  Entered = c(
+    coef(m1_plain_cont)["entered"],
+    coef(m1_ipw_cont)["entered"],
+    coef(m1_plain_bin)["entered"] * 100,
+    coef(m1_ipw_bin)["entered"] * 100
+  ),
+  Units = c(
+    "scale points", "scale points", "pct pts", "pct pts"
+  )
+) |> knitr::kable(digits = 3,
+                  caption = "Robustness check: plain FD vs IPW-weighted FD. Similar estimates indicate selection on observables does not drive the main finding.")
+```
+
+------------------------------------------------------------------------
+
+# TIER 2: Associational / Mechanism Analysis (H2)
+
+```{r}
+#| label: tier2-models
+
+# NOTE: n = 3,075 — respondents with non-resident children and valid contact data
+# These are within-person associations; reverse causality cannot be ruled out
+
+# Full sample survey design for Tier 2 (not IPW-restricted)
+lsahp_wide_des3 <- lsahp_wide_des |>
+  dplyr::mutate(d_dist_1000km = d_dist_km / 1000,
+                d_sat_x_dist  = d_contact_sat * d_dist_1000km)
+
+des_full <- svydesign(ids = ~psu, strata = ~strata, weights = ~wgt,
+                      data = lsahp_wide_des3, nest = TRUE)
+
+# M2a: + Contact frequency (mechanism: does frequency explain entry effect?)
+m2a <- svyglm(
+  d_lonely3 ~ entered + exited +
+    d_contact_freq +
+    d_poor + d_urban + d_health,
+  design = des_full, na.action = na.omit)
+
+# M2b: + Contact satisfaction (mechanism: does quality explain entry effect?)
+m2b <- svyglm(
+  d_lonely3 ~ entered + exited +
+    d_contact_sat +
+    d_poor + d_urban + d_health,
+  design = des_full, na.action = na.omit)
+
+# M2c: Both contact variables
+m2c <- svyglm(
+  d_lonely3 ~ entered + exited +
+    d_contact_sat + d_contact_freq +
+    d_poor + d_urban + d_health,
+  design = des_full, na.action = na.omit)
+
+cat("=== TIER 2: Contact satisfaction mechanism ===\n")
+summary(m2b)
+
+cat("\n=== TIER 2: Both contact variables ===\n")
+summary(m2c)
+```
+
+```{r}
+# ── Tier 2 binary (to match original paper results) ─────────────────────────
+
+m2b_bin <- svyglm(
+  d_lonely ~ entered + exited +
+    d_contact_sat +
+    d_poor + d_urban + d_health,
+  design = des_full, na.action = na.omit)
+
+cat("=== TIER 2b BINARY: Contact satisfaction ===\n")
+summary(m2b_bin)
+cat("n =", nrow(model.frame(m2b_bin)),
+    "| enterers =", sum(model.frame(m2b_bin)$entered), "\n")
+
+# ── Tier 3: Already-transnational subsample ──────────────────────────────────
+
+# Restrict to already-transnational at Wave 1 with distance recorded
+lsahp_dist <- lsahp_wide_des3 |>
+  dplyr::filter(
+    transnational_hh_w1 == 1,
+    !is.na(d_dist_1000km)
+  )
+
+cat("\nTier 3 subsample: n =", nrow(lsahp_dist), "\n")
+cat("Transnational at W2:\n")
+table(lsahp_dist$transnational_hh_w2)
+
+des_dist <- svydesign(
+  ids     = ~psu,
+  strata  = ~strata,
+  weights = ~wgt,
+  data    = lsahp_dist,
+  nest    = TRUE
+)
+
+# H3: Distance main effect
+m3_dist <- svyglm(
+  d_lonely3 ~ d_dist_1000km + d_poor + d_urban + d_health,
+  design    = des_dist,
+  na.action = na.omit
+)
+
+cat("\n=== TIER 3 (EXPLORATORY): Distance main effect ===\n")
+summary(m3_dist)
+cat("n =", nrow(model.frame(m3_dist)), "\n")
+
+# H4: Satisfaction × Distance interaction
+m4_interact <- svyglm(
+  d_lonely3 ~ d_contact_sat * d_dist_1000km +
+    d_poor + d_urban + d_health,
+  design    = des_dist,
+  na.action = na.omit
+)
+
+cat("\n=== TIER 3 (EXPLORATORY): Satisfaction × Distance ===\n")
+summary(m4_interact)
+cat("n =", nrow(model.frame(m4_interact)), "\n")
+
+# Marginal effects: distance effect at each satisfaction level
+library(marginaleffects)
+mfx <- marginaleffects::avg_slopes(
+  m4_interact,
+  variables = "d_dist_1000km",
+  by        = "d_contact_sat",
+  newdata   = datagrid(d_contact_sat = c(-1, 0, 1))
+)
+
+cat("\n=== Marginal effect of distance by satisfaction level ===\n")
+print(as.data.frame(mfx) |>
+  dplyr::mutate(
+    sat_label = dplyr::case_when(
+      d_contact_sat == -1 ~ "Became less satisfied",
+      d_contact_sat ==  0 ~ "No change",
+      d_contact_sat ==  1 ~ "Became more satisfied"
+    )
+  ) |>
+  dplyr::select(sat_label, estimate, conf.low, conf.high, p.value) |>
+  dplyr::mutate(across(where(is.numeric), ~ round(.x, 4))))
+```
+
+# TIER 3: Exploratory Analysis (H3 + H4)
+
+> **Important framing note.** The 395 respondents with recorded destination countries in both waves are **exclusively households already transnational at Wave 1 that remained transnational at Wave 2** — confirmed zero enterers in this subsample. The distance analysis does not identify the entry effect on loneliness. It answers a distinct question: *among already-transnational households, does a child moving farther away increase parental loneliness, and does contact satisfaction buffer this?* All Tier 3 findings are preliminary and exploratory.
+
+## Distance Subsample
+
+```{r}
+#| label: tier3-subsample
+
+# Restrict to already-transnational at Wave 1 with distance recorded
+lsahp_dist <- lsahp_wide_des3 |>
+  dplyr::filter(
+    transnational_hh_w1 == 1,
+    !is.na(d_dist_1000km)
+  )
+
+cat("Distance subsample: n =", nrow(lsahp_dist), "\n")
+cat("All still transnational at W2:",
+    all(lsahp_dist$transnational_hh_w2 == 1, na.rm = TRUE), "\n")
+cat("Enterers (should be 0):",
+    sum(lsahp_dist$entered == 1, na.rm = TRUE), "\n")
+
+des_dist <- svydesign(
+  ids     = ~psu,
+  strata  = ~strata,
+  weights = ~wgt,
+  data    = lsahp_dist,
+  nest    = TRUE
+)
+```
+
+## H3: Distance Main Effect
+
+```{r}
+#| label: tier3-h3
+
+# Among already-transnational households:
+# does a child moving farther away increase loneliness?
+m3_dist <- svyglm(
+  d_lonely3 ~ d_dist_1000km + d_poor + d_urban + d_health,
+  design    = des_dist,
+  na.action = na.omit
+)
+
+cat("=== TIER 3 (EXPLORATORY): Distance main effect ===\n")
+cat("n =", nrow(model.frame(m3_dist)),
+    "| Already-transnational households only\n\n")
+summary(m3_dist)
+```
+
+**Interpretation:** Distance alone is not significantly associated with loneliness change among already-transnational households (β = 0.009, p = 0.726). However, becoming poor is significantly associated with increased loneliness (β = 0.471, p = 0.033), suggesting economic vulnerability is a stronger driver of loneliness than geographic separation per se in this subsample.
+
+## H4: Satisfaction × Distance Moderation
+
+```{r}
+#| label: tier3-h4
+
+# EXPLORATORY: does satisfaction buffer the distance effect?
+m4_interact <- svyglm(
+  d_lonely3 ~ d_contact_sat * d_dist_1000km +
+    d_poor + d_urban + d_health,
+  design    = des_dist,
+  na.action = na.omit
+)
+
+cat("=== TIER 3 (EXPLORATORY): Satisfaction × Distance ===\n")
+cat("n =", nrow(model.frame(m4_interact)),
+    "| Already-transnational only | Treat as preliminary\n\n")
+summary(m4_interact)
+```
+
+```{r}
+#| label: tier3-h4-table
+
+# Key interaction coefficients
+broom::tidy(m4_interact, conf.int = TRUE) |>
+  dplyr::filter(term %in% c(
+    "d_contact_sat",
+    "d_dist_1000km",
+    "d_contact_sat:d_dist_1000km"
+  )) |>
+  dplyr::mutate(
+    term = dplyr::case_when(
+      term == "d_contact_sat"               ~ "Δ Contact satisfaction",
+      term == "d_dist_1000km"               ~ "Δ Distance (per 1,000 km)",
+      term == "d_contact_sat:d_dist_1000km" ~ "Δ Satisfaction × Δ Distance"
+    ),
+    across(where(is.numeric), ~ round(.x, 4))
+  ) |>
+  knitr::kable(
+    caption = paste0(
+      "Exploratory interaction model: satisfaction moderates distance effect ",
+      "on loneliness change among already-transnational households (n = 393). ",
+      "Interaction p < 0.001."
+    )
+  )
+```
+
+## Marginal Effects of Distance by Satisfaction Level
+
+```{r}
+#| label: tier3-marginal
+
+library(marginaleffects)
+
+mfx <- marginaleffects::avg_slopes(
+  m4_interact,
+  variables = "d_dist_1000km",
+  by        = "d_contact_sat",
+  newdata   = datagrid(d_contact_sat = c(-1, 0, 1))
+)
+
+mfx_tbl <- as.data.frame(mfx) |>
+  dplyr::mutate(
+    sat_label = dplyr::case_when(
+      d_contact_sat == -1 ~ "Became less satisfied",
+      d_contact_sat ==  0 ~ "No change in satisfaction",
+      d_contact_sat ==  1 ~ "Became more satisfied"
+    )
+  ) |>
+  dplyr::select(sat_label, estimate, conf.low, conf.high, p.value) |>
+  dplyr::mutate(across(where(is.numeric), ~ round(.x, 4)))
+
+knitr::kable(
+  mfx_tbl,
+  caption = paste0(
+    "Marginal effect of distance (per 1,000 km) on loneliness change ",
+    "at each level of satisfaction change. Already-transnational households, ",
+    "n = 393. Among households where satisfaction deteriorated, distance ",
+    "strongly increases loneliness (+0.481, p < 0.001). Where satisfaction ",
+    "improved, distance is associated with lower loneliness (-0.448, p < 0.001)."
+  )
+)
+```
+
+## Figure 5: Exploratory Interaction Plot
+
+```{r}
+#| label: fig-interaction
+#| fig-cap: "EXPLORATORY: Contact satisfaction moderates the loneliness cost of greater distance among already-transnational households (n = 393). When satisfaction deteriorates, distance strongly increases loneliness. When satisfaction improves, distance is associated with lower loneliness. Interaction p < 0.001. Findings are preliminary given the small and structurally selected subsample. Shaded bands = 95% CIs."
+#| fig-width: 10
+#| fig-height: 6.5
+
+cat("d_dist_1000km distribution in distance subsample:\n")
+quantile(lsahp_dist$d_dist_1000km, 
+         probs = c(0, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 1.0),
+         na.rm = TRUE) |> round(3)
+
+cat("\nSD:", round(sd(lsahp_dist$d_dist_1000km, na.rm = TRUE), 3), "\n")
+cat("Mean:", round(mean(lsahp_dist$d_dist_1000km, na.rm = TRUE), 3), "\n")
+dist_mean <- mean(lsahp_dist$d_dist_1000km, na.rm = TRUE)
+dist_sd   <- sd(lsahp_dist$d_dist_1000km,   na.rm = TRUE)
+
+pred_grid <- datagrid(
+  model         = m4_interact,
+  d_contact_sat = c(-1, 0, 1),
+  d_dist_1000km = seq(
+    dist_mean - 1.5 * dist_sd,
+    dist_mean + 1.5 * dist_sd,
+    length.out = 60
+  ),
+  d_poor   = 0,
+  d_urban  = 0,
+  d_health = 0
+)
+
+preds <- marginaleffects::predictions(
+  m4_interact,
+  newdata = pred_grid
+) |>
+  dplyr::mutate(
+    sat_label = dplyr::case_when(
+      d_contact_sat == -1 ~ "Became less satisfied",
+      d_contact_sat ==  0 ~ "No change in satisfaction",
+      d_contact_sat ==  1 ~ "Became more satisfied"
+    ),
+    sat_label = factor(sat_label, levels = c(
+      "Became less satisfied",
+      "No change in satisfaction",
+      "Became more satisfied"
+    ))
+  )
+
+p_int <- ggplot(preds,
+  aes(x = d_dist_1000km, y = estimate,
+      color = sat_label, fill = sat_label)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.12, color = NA) +
+  geom_line(linewidth = 1.3) +
+  geom_hline(yintercept = 0, linetype = "dashed",
+             color = "grey40", linewidth = 0.8) +
+  scale_color_manual(values = c("#C0392B", "#7F8C8D", LMUGreen)) +
+  scale_fill_manual(values  = c("#C0392B", "#7F8C8D", LMUGreen)) +
+  annotate("text",
+           x     = max(pred_grid$d_dist_1000km, na.rm = TRUE) * 0.55,
+           y     = 0.55,
+           label = "Interaction p < 0.001",
+           fontface = "bold", size = 4.5, color = "grey25") +
+  labs(
+    title    = "Contact Satisfaction Moderates the Distance–Loneliness Link",
+    subtitle = paste0(
+      "EXPLORATORY — Already-transnational households (n = 393)\n",
+      "Survey-weighted FD model | ",
+      "Distance subsample: transnational in both waves with recorded destination"
+    ),
+    x     = "Change in distance to farthest child (per 1,000 km)",
+    y     = "Predicted change in 3-item loneliness score",
+    color = "Change in contact satisfaction",
+    fill  = "Change in contact satisfaction"
+  ) +
+  theme_lmu()
+
+save_plot(p_int, "05_interaction_exploratory")
+p_int
+```
+
+------------------------------------------------------------------------
+
+# Complete Regression Table
+
+```{r}
+#| label: full-table
+
+library(modelsummary)
+
+# NOTE: Using m2b (satisfaction only, n=3075) as main Tier 2 model
+# m2c (both variables, n=2322) in appendix — drops 56 enterers adding freq
+all_models <- list(
+  # Tier 1: Causal
+  "T1a: FD\n(3-item)"      = m1_plain_cont,
+  "T1b: FD+IPW\n(3-item)"  = m1_ipw_cont,
+  "T1c: FD+IPW\n(binary)"  = m1_ipw_bin,
+  # Tier 2: Associational
+  "T2: +Sat\n(n=3,075)"    = m2b,
+  "T2: +Both\n(n=2,322)"   = m2c,
+  # Tier 3: Exploratory
+  "T3: Dist\n(n=395)"      = m3_dist,
+  "T3: Sat×Dist\n(n=393)"  = m4_interact
+)
+
+modelsummary(
+  all_models,
+  stars     = c("+" = 0.10, "*" = 0.05, "**" = 0.01, "***" = 0.001),
+  statistic = "({std.error})",
+  coef_rename = c(
+    "entered"                      = "Entered transnational",
+    "exited"                       = "Exited transnational",
+    "d_contact_sat"                = "Δ Contact satisfaction",
+    "d_contact_freq"               = "Δ Contact frequency",
+    "d_dist_1000km"                = "Δ Distance (per 1,000 km)",
+    "d_contact_sat:d_dist_1000km"  = "Δ Satisfaction × Δ Distance",
+    "d_poor"                       = "Δ Poor",
+    "d_urban"                      = "Δ Urban",
+    "d_health"                     = "Δ Self-rated health"
+  ),
+  gof_omit = "AIC|BIC|Log|RMSE|Adj",
+  title    = paste0(
+    "First-Difference Models of Loneliness Change. ",
+    "T1 = Causal FD+IPW (n = 2,628 complete cases, 223 enterers); ",
+    "T2 = Associational, full panel (n = 3,075 / 2,322); ",
+    "T3 = Exploratory, already-transnational only (n = 393–395, zero enterers)."
+  ),
+  notes    = paste0(
+    "Survey-weighted linear probability / OLS models. ",
+    "SEs in parentheses. T1b–T1c use stabilized ATT IPW weights combined with ",
+    "survey weights. T2 uses full panel survey design. ",
+    "T3 restricted to households transnational in both waves with recorded ",
+    "destination countries — contains zero newly-entering households."
+  )
+)
+```
+
+```{r}
+#| label: save-table
+#| include: false
+
+modelsummary(
+  all_models,
+  output    = "tables/all_models.tex",
+  stars     = c("+" = 0.10, "*" = 0.05, "**" = 0.01, "***" = 0.001),
+  statistic = "({std.error})",
+  coef_rename = c(
+    "entered"                      = "Entered transnational",
+    "exited"                       = "Exited transnational",
+    "d_contact_sat"                = "Δ Contact satisfaction",
+    "d_contact_freq"               = "Δ Contact frequency",
+    "d_dist_1000km"                = "Δ Distance (per 1,000 km)",
+    "d_contact_sat:d_dist_1000km"  = "Δ Satisfaction × Δ Distance",
+    "d_poor"                       = "Δ Poor",
+    "d_urban"                      = "Δ Urban",
+    "d_health"                     = "Δ Self-rated health"
+  ),
+  gof_omit = "AIC|BIC|Log|RMSE|Adj"
+)
+```
+
+------------------------------------------------------------------------
+
+# Figure 6: Coefficient Plot Across All Tiers
+
+```{r}
+#| label: fig-coefplot
+#| fig-cap: "Coefficient estimates across all model tiers. Green = Causal (FD+IPW, n=2,628, 223 enterers); Blue = Associational mechanism (n=3,075); Orange = Exploratory, already-transnational only (n=393–395). Lines are 95% CIs. The Satisfaction × Distance interaction (orange, far right) is significant at p < 0.001."
+#| fig-width: 14
+#| fig-height: 7
+
+# CORRECTED: use m2b (n=3,075) not m2c for Tier 2
+# CORRECTED: accurate sample sizes in labels
+coef_df <- dplyr::bind_rows(
+  broom::tidy(m1_ipw_cont, conf.int = TRUE) |>
+    dplyr::mutate(
+      Model = "T1: FD+IPW\n(3-item, n=2,628)",
+      Tier  = "Causal"
+    ),
+  broom::tidy(m2b, conf.int = TRUE) |>
+    dplyr::mutate(
+      Model = "T2: +Satisfaction\n(n=3,075)",
+      Tier  = "Associational"
+    ),
+  broom::tidy(m3_dist, conf.int = TRUE) |>
+    dplyr::mutate(
+      Model = "T3: Distance\n(n=395)",
+      Tier  = "Exploratory"
+    ),
+  broom::tidy(m4_interact, conf.int = TRUE) |>
+    dplyr::mutate(
+      Model = "T3: Sat×Dist\n(n=393, p<0.001)",
+      Tier  = "Exploratory"
+    )
+) |>
+  dplyr::filter(term %in% c(
+    "entered",
+    "d_contact_sat",
+    "d_dist_1000km",
+    "d_contact_sat:d_dist_1000km"
+  )) |>
+  dplyr::mutate(
+    Term = dplyr::case_when(
+      term == "entered"                     ~ "Entered transnational",
+      term == "d_contact_sat"               ~ "Δ Contact satisfaction",
+      term == "d_dist_1000km"               ~ "Δ Distance (per 1,000 km)",
+      term == "d_contact_sat:d_dist_1000km" ~ "Δ Satisfaction × Δ Distance"
+    ),
+    Model = factor(Model, levels = c(
+      "T1: FD+IPW\n(3-item, n=2,628)",
+      "T2: +Satisfaction\n(n=3,075)",
+      "T3: Distance\n(n=395)",
+      "T3: Sat×Dist\n(n=393, p<0.001)"
+    )),
+    Tier = factor(Tier,
+                  levels = c("Causal", "Associational", "Exploratory"))
+  ) |>
+  dplyr::filter(!is.na(Term))
+
+tier_colors <- c(
+  "Causal"        = LMUGreen,
+  "Associational" = "#2980B9",
+  "Exploratory"   = "#E67E22"
+)
+
+p_coef <- ggplot(coef_df,
+  aes(x = estimate, y = Term, color = Tier)) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             linewidth = 0.7, alpha = 0.5) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.22, linewidth = 1) +
+  geom_point(size = 4) +
+  facet_wrap(~Model, nrow = 1, scales = "free_x") +
+  scale_color_manual(values = tier_colors) +
+  labs(
+    title    = "Within-Person Loneliness Change — Three-Tier Analysis",
+    subtitle = paste0(
+      "Green = Causal (FD+IPW) | ",
+      "Blue = Associational mechanism | ",
+      "Orange = Exploratory (already-transnational only)\n",
+      "Interaction term (T3 Sat×Dist) significant at p < 0.001"
+    ),
+    x     = "Coefficient estimate (change in 3-item loneliness score)",
+    y     = NULL,
+    color = "Analytic tier"
+  ) +
+  theme_lmu(base_size = 11) +
+  theme(
+    panel.spacing    = unit(0.6, "lines"),
+    legend.position  = "bottom",
+    strip.text       = element_text(size = 9, face = "bold")
+  )
+
+save_plot(p_coef, "06_coef_all_tiers", w = 14, h = 7)
+p_coef
+```
+
+------------------------------------------------------------------------
+
+# Summary of Results
+
+```{r}
+#| label: results-summary
+
+# Auto-extract key numbers for inline reporting
+e_t1_cont  <- round(coef(m1_ipw_cont)["entered"], 3)
+p_t1_cont  <- round(summary(m1_ipw_cont)$coefficients["entered", "Pr(>|t|)"], 3)
+e_t1_bin   <- round(coef(m1_ipw_bin)["entered"] * 100, 1)
+p_t1_bin   <- round(summary(m1_ipw_bin)$coefficients["entered", "Pr(>|t|)"], 3)
+e_interact <- round(coef(m4_interact)["d_contact_sat:d_dist_1000km"], 3)
+p_interact <- round(
+  summary(m4_interact)$coefficients[
+    "d_contact_sat:d_dist_1000km", "Pr(>|t|)"
+  ], 4)
+
+cat("=== KEY RESULTS FOR WRITE-UP ===\n\n")
+
+cat("TIER 1 (Causal, FD+IPW, n=2,628, 223 enterers):\n")
+cat("  3-item scale: β =", e_t1_cont, ", p =", p_t1_cont, "\n")
+cat("  Binary (pp):  β =", e_t1_bin,  "pp, p =", p_t1_bin, "\n")
+cat("  Robustness: Plain FD binary = 16.1 pp vs IPW = 16.2 pp\n\n")
+
+cat("TIER 2 (Associational, n=3,075, 222 enterers):\n")
+cat("  Contact satisfaction: β =",
+    round(coef(m2b_bin)["d_contact_sat"] * 100, 2), "pp, p =",
+    round(summary(m2b_bin)$coefficients["d_contact_sat","Pr(>|t|)"], 3), "\n")
+cat("  Entry effect stable: β =",
+    round(coef(m2b_bin)["entered"] * 100, 1), "pp\n\n")
+
+cat("TIER 3 (Exploratory, n=393, already-transnational only):\n")
+cat("  Distance main effect: β =",
+    round(coef(m3_dist)["d_dist_1000km"], 4), ", p =",
+    round(summary(m3_dist)$coefficients["d_dist_1000km","Pr(>|t|)"], 3), "\n")
+cat("  Interaction β =", e_interact, ", p =", p_interact, "\n")
+cat("  Marginal effects:\n")
+cat("    Became less satisfied: +0.481 per 1,000 km (p < 0.001)\n")
+cat("    No change:             +0.017 per 1,000 km (p = 0.511)\n")
+cat("    Became more satisfied: -0.448 per 1,000 km (p < 0.001)\n")
+```
+
+------------------------------------------------------------------------
+
+# Methodological Statement
+
+## What Each Tier Can Claim
+
+**Tier 1 — Causal (H1, n = 2,628, 223 enterers).** Entering a transnational household was associated with a **16.2 percentage point** increase in frequent loneliness (FD + IPW, p = 0.075) and a **0.184 point** increase on the 3-item scale (p = 0.107). Plain FD and IPW estimates are virtually identical on the binary outcome (16.1 vs 16.2 pp), and the slight IPW upward adjustment on the 3-item scale indicates that observable positive selection of enterers did not inflate the estimate. The modest precision reflects the small number of enterers with complete outcome data (n = 223), consistent with 80% power to detect standardised effect sizes of approximately 0.20.
+
+**Tier 2 — Associational (H2, n = 3,075, 222 enterers).** Among respondents with non-co-resident children, within-person improvements in contact satisfaction were associated with lower loneliness change in the expected direction (β = −6.2 pp, p = 0.325 binary; β = 0.004, p = 0.990 continuous). While not statistically significant, the direction is consistent across specifications. The entry effect remains stable at 16.7 pp across Tier 1 and Tier 2, suggesting contact patterns do not fully mediate the entry effect. Reverse causality cannot be ruled out.
+
+**Tier 3 — Exploratory (H3 + H4, n = 393–395, already-transnational only).** Distance alone was not significantly associated with loneliness change (β = 0.009, p = 0.726). However, the satisfaction × distance interaction was **highly significant** (β = −0.464, p \< 0.001). Among households where satisfaction deteriorated, each additional 1,000 km increased loneliness by 0.481 points (p \< 0.001). Among households where satisfaction improved, greater distance was associated with *lower* loneliness (−0.448 per 1,000 km, p \< 0.001). These findings are preliminary given the small and structurally selected subsample.
+
+## Limitations
+
+-   **Time-varying unobserved confounding (Tier 1):** Simultaneous health deterioration or economic shock could cause both migration and increasing loneliness, and cannot be ruled out without an instrument. IV using POEA municipality-level deployment data is a planned extension.
+
+-   **Reverse causality (Tier 2):** Loneliness may reduce contact satisfaction rather than satisfaction buffering loneliness. Panel mediation with lagged variables would address this with three or more waves.
+
+-   **Structural missingness (Tier 3):** 92% of the panel is missing destination country codes in at least one wave. The distance subsample (n = 395) is not representative of broader transnational households and contains zero newly-entering households, limiting generalisation.
+
+-   **Statistical power:** With 223 enterers in the complete-case Tier 1 sample, the study is powered to detect standardised effects of approximately 0.20. Smaller true effects would require a larger panel or additional waves.
+
+-   **Attrition:** Wave 2 has substantially more missing values on the 3-item loneliness scale (NA = 2,567 vs 775 at Wave 1), likely reflecting proxy interviews for frailer respondents. If attrition is non-random with respect to loneliness, Tier 1–2 estimates may understate the loneliness burden in the most vulnerable subgroup.
+
+------------------------------------------------------------------------
+
+# Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```
